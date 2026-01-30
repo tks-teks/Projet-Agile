@@ -80,6 +80,8 @@ const computeSchedule = () => {
   const inDegree = new Map();
   const earliestStart = new Map();
   const earliestFinish = new Map();
+  const latestStart = new Map();
+  const latestFinish = new Map();
 
   tasks.forEach((task) => {
     inDegree.set(task.code, predecessors.get(task.code)?.length ?? 0);
@@ -95,10 +97,11 @@ const computeSchedule = () => {
     order.push(code);
     const baseFinish = earliestFinish.get(code);
     (successors.get(code) || []).forEach((next) => {
-      if (baseFinish > earliestStart.get(next)) {
-        earliestStart.set(next, baseFinish);
-        const nextTask = findTask(next);
-        earliestFinish.set(next, baseFinish + (nextTask?.duration ?? 0));
+      const nextTask = findTask(next);
+      const candidateStart = baseFinish;
+      if (candidateStart > (earliestStart.get(next) ?? 0)) {
+        earliestStart.set(next, candidateStart);
+        earliestFinish.set(next, candidateStart + (nextTask?.duration ?? 0));
       }
       inDegree.set(next, inDegree.get(next) - 1);
       if (inDegree.get(next) === 0) {
@@ -109,29 +112,32 @@ const computeSchedule = () => {
 
   const projectDuration = Math.max(0, ...Array.from(earliestFinish.values()));
 
-  const longestPath = new Map();
-  tasks.forEach((task) => longestPath.set(task.code, task.duration));
-
-  order.forEach((code) => {
-    const current = longestPath.get(code);
-    (successors.get(code) || []).forEach((next) => {
-      const nextTask = findTask(next);
-      const candidate = current + (nextTask?.duration ?? 0);
-      if (candidate > longestPath.get(next)) {
-        longestPath.set(next, candidate);
-      }
-    });
+  const reverseOrder = [...order].reverse();
+  reverseOrder.forEach((code) => {
+    const task = findTask(code);
+    const successorsList = successors.get(code) || [];
+    if (successorsList.length === 0) {
+      latestFinish.set(code, projectDuration);
+    } else {
+      const minLatestStart = Math.min(...successorsList.map((succ) => latestStart.get(succ) ?? projectDuration));
+      latestFinish.set(code, minLatestStart);
+    }
+    latestStart.set(code, (latestFinish.get(code) ?? projectDuration) - (task?.duration ?? 0));
   });
 
-  const criticalTasks = tasks
-    .filter((task) => longestPath.get(task.code) === projectDuration)
-    .map((task) => task.code);
+  const slack = new Map();
+  tasks.forEach((task) => {
+    slack.set(task.code, (latestStart.get(task.code) ?? 0) - (earliestStart.get(task.code) ?? 0));
+  });
+
+  const criticalTasks = tasks.filter((task) => slack.get(task.code) === 0).map((task) => task.code);
 
   const criticalEdges = new Set();
   dependencies.forEach((dep) => {
     const start = earliestStart.get(dep.from) ?? 0;
     const finish = earliestFinish.get(dep.from) ?? 0;
-    if (finish === (earliestStart.get(dep.to) ?? 0) && criticalTasks.includes(dep.from) && criticalTasks.includes(dep.to)) {
+    const nextStart = earliestStart.get(dep.to) ?? 0;
+    if (finish === nextStart && slack.get(dep.from) === 0 && slack.get(dep.to) === 0) {
       criticalEdges.add(`${dep.from}-${dep.to}`);
     }
   });
@@ -139,6 +145,9 @@ const computeSchedule = () => {
   return {
     earliestStart,
     earliestFinish,
+    latestStart,
+    latestFinish,
+    slack,
     projectDuration,
     criticalTasks,
     criticalEdges,
@@ -183,7 +192,7 @@ const renderSelectors = () => {
 };
 
 const renderSchedule = () => {
-  const { earliestStart, earliestFinish, projectDuration, criticalTasks } = computeSchedule();
+  const { earliestStart, earliestFinish, latestStart, latestFinish, slack, projectDuration, criticalTasks } = computeSchedule();
 
   projectDurationEl.textContent = `${projectDuration} jours`;
   criticalTasksEl.textContent = criticalTasks.length ? criticalTasks.join(', ') : 'Aucune';
@@ -199,6 +208,7 @@ const renderSchedule = () => {
       <div>
         <p class="font-semibold">${task.code} - ${task.name}</p>
         <p class="text-xs text-slate-400">ES ${earliestStart.get(task.code)}j • EF ${earliestFinish.get(task.code)}j</p>
+        <p class="text-xs text-slate-400">LS ${latestStart.get(task.code)}j • LF ${latestFinish.get(task.code)}j • Marge ${slack.get(task.code)}j</p>
       </div>
       ${criticalBadge}
     `;
@@ -209,18 +219,39 @@ const renderSchedule = () => {
 const renderGantt = () => {
   const { earliestStart, earliestFinish, projectDuration, criticalTasks } = computeSchedule();
   ganttEl.innerHTML = '';
-  ganttScaleEl.textContent = `0 → ${projectDuration} jours`;
+  ganttScaleEl.innerHTML = '';
+
+  const scale = document.createElement('div');
+  scale.className = 'grid gap-1 text-xs text-slate-400';
+  scale.style.gridTemplateColumns = `140px repeat(${Math.max(projectDuration, 1)}, minmax(0, 1fr))`;
+
+  const scaleLabel = document.createElement('div');
+  scaleLabel.className = 'text-slate-500';
+  scaleLabel.textContent = 'Jours';
+  scale.appendChild(scaleLabel);
+
+  for (let day = 1; day <= Math.max(projectDuration, 1); day += 1) {
+    const tick = document.createElement('div');
+    tick.className = 'text-center';
+    tick.textContent = day;
+    scale.appendChild(tick);
+  }
+
+  ganttScaleEl.appendChild(scale);
 
   tasks.forEach((task) => {
     const row = document.createElement('div');
-    row.className = 'grid grid-cols-[140px_1fr] gap-3 items-center';
+    row.className = 'grid gap-2 items-center';
+    row.style.gridTemplateColumns = `140px 1fr`;
 
     const label = document.createElement('div');
     label.className = 'text-sm';
     label.textContent = `${task.code} ${task.name}`;
 
-    const barWrapper = document.createElement('div');
-    barWrapper.className = 'relative h-6 bg-slate-950 border border-slate-800 rounded-full overflow-hidden';
+    const timeline = document.createElement('div');
+    timeline.className = 'relative h-8 rounded-lg border border-slate-800 bg-slate-950';
+    timeline.style.backgroundImage = 'linear-gradient(to right, rgba(148,163,184,0.15) 1px, transparent 1px)';
+    timeline.style.backgroundSize = `${100 / Math.max(projectDuration, 1)}% 100%`;
 
     const bar = document.createElement('div');
     const start = earliestStart.get(task.code) || 0;
@@ -228,18 +259,18 @@ const renderGantt = () => {
     const widthPercent = projectDuration > 0 ? ((finish - start) / projectDuration) * 100 : 0;
     const leftPercent = projectDuration > 0 ? (start / projectDuration) * 100 : 0;
 
-    bar.className = `absolute top-0 h-full rounded-full ${criticalTasks.includes(task.code) ? 'bg-rose-500' : 'bg-cyan-500'}`;
+    bar.className = `absolute top-1/2 -translate-y-1/2 h-4 rounded-full ${criticalTasks.includes(task.code) ? 'bg-rose-500' : 'bg-cyan-500'}`;
     bar.style.left = `${leftPercent}%`;
-    bar.style.width = `${widthPercent}%`;
+    bar.style.width = `${Math.max(widthPercent, 2)}%`;
 
     const text = document.createElement('span');
-    text.className = 'absolute inset-y-0 left-2 text-xs text-slate-950 font-semibold flex items-center';
+    text.className = 'absolute inset-y-0 left-2 text-[10px] text-slate-950 font-semibold flex items-center';
     text.textContent = `${start} → ${finish} j`;
 
-    barWrapper.appendChild(bar);
-    barWrapper.appendChild(text);
+    timeline.appendChild(bar);
+    timeline.appendChild(text);
     row.appendChild(label);
-    row.appendChild(barWrapper);
+    row.appendChild(timeline);
     ganttEl.appendChild(row);
   });
 };
